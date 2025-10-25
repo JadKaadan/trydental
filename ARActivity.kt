@@ -186,13 +186,25 @@ class ARActivity : AppCompatActivity() {
 
     private fun setupARListeners() {
         try {
-            // Set up exception handler
+            // Set up session initialization listener
             arFragment?.setOnSessionInitializationListener { session ->
                 Log.d(TAG, "AR Session initialized successfully")
                 isARInitialized = true
                 runOnUiThread {
-                    loadBracketModel()
                     updateStatus("AR Ready - Loading bracket model...")
+                    loadBracketModel()
+                }
+            }
+
+            // Check if session already exists (in case listener was set after initialization)
+            arFragment?.arSceneView?.session?.let { session ->
+                Log.d(TAG, "Session already exists in setupARListeners")
+                if (!isARInitialized) {
+                    isARInitialized = true
+                    runOnUiThread {
+                        updateStatus("AR Ready - Loading bracket model...")
+                        loadBracketModel()
+                    }
                 }
             }
 
