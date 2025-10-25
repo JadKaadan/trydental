@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dental AR Bracket Placer</string>
+
+    <!-- Main Activity -->
+    <string name="start_ar_session">Start AR Session</string>
+    <string name="app_title">Dental AR</string>
+    <string name="app_subtitle">Bracket Placement System</string>
+
+    <!-- Status Messages -->
+    <string name="loading">Loading…</string>
+    <string name="ready">Ready to start</string>
+    <string name="scanning">Scanning for teeth…</string>
+    <string name="tracking">Tracking - Ready</string>
+    <string name="tracking_paused">Tracking paused - Move device</string>
+    <string name="tracking_lost">Tracking lost</string>
+
+    <!-- Detection -->
+    <string name="detection_in_progress">Scanning for teeth…</string>
+    <string name="teeth_detected">Detected %d teeth</string>
+    <string name="no_teeth_detected">No teeth detected</string>
+
+    <!-- Buttons -->
+    <string name="scan_teeth">Start Scanning</string>
+    <string name="capture">Capture</string>
+    <string name="reset">Reset</string>
+    <string name="delete_bracket">Delete Bracket</string>
+    <string name="back">Back</string>
+    <string name="info">Info</string>
+
+    <!-- Hints -->
+    <string name="zoom_hint">🤏 Pinch to zoom in/out</string>
+    <string name="rotate_hint">🔄 Two fingers to rotate</string>
+    <string name="tap_hint">👆 Tap to place bracket</string>
+    <string name="drag_hint">✋ Drag to move</string>
+
+    <!-- Controls -->
+    <string name="rotation_label">Rotation:</string>
+    <string name="scale_label">Scale:</string>
+    <string name="bracket_selected">Bracket #%d selected</string>
+
+    <!-- Toasts -->
+    <string name="bracket_placed">Bracket placed! Use gestures to adjust</string>
+    <string name="bracket_deleted">Bracket deleted</string>
+    <string name="scene_reset">Scene reset - %d brackets removed</string>
+    <string name="capture_success">Saved: %s</string>
+    <string name="capture_failed">Failed to capture image</string>
+    <string name="model_loaded">3D bracket model loaded</string>
+    <string name="model_loading">Loading bracket model…</string>
+    <string name="model_failed">Failed to load 3D model</string>
+
+    <!-- Permissions -->
+    <string name="camera_permission_required">Camera permission is required for AR</string>
+    <string name="ar_core_not_available">ARCore is not supported on this device</string>
+
+    <!-- Info Dialog -->
+    <string name="info_title">How to Use</string>
+    <string name="info_message">
+        1. Tap \'Start Scanning\' to begin\n
+        2. Point camera at dental model or teeth\n
+        3. Tap on surfaces to place brackets\n
+        4. Use gestures to adjust:\n
+           • Pinch to zoom\n
+           • Two-finger rotate\n
+           • Drag to move\n
+        5. Tap bracket to select and use controls\n
+        6. Tap capture (📷) to save result\n\n
+        Required files in assets folder:\n
+        • Bracket.obj (3D model)\n
+        • tooth_detection_yolov8.tflite (ML model)
+    </string>
+</resources>
