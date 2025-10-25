@@ -16,7 +16,9 @@ import androidx.appcompat.app.AppCompatActivity
 import com.dental.arapp.databinding.ActivityArBinding
 import com.google.ar.core.*
 import com.google.ar.core.exceptions.NotYetAvailableException
+import com.google.ar.core.exceptions.UnavailableException
 import com.google.ar.sceneform.AnchorNode
+import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Quaternion
 import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.rendering.Color
@@ -34,7 +36,7 @@ import java.util.*
 class ARActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityArBinding
-    private lateinit var arFragment: CustomArFragment
+    private var arFragment: CustomArFragment? = null
     private lateinit var teethDetector: TeethDetector
 
     private var isScanning = false
@@ -44,6 +46,7 @@ class ARActivity : AppCompatActivity() {
 
     private var bracketRenderable: Renderable? = null
     private var isLoadingModel = false
+    private var isARInitialized = false
 
     private var rotationAngle = 0f
     private var scaleValue = 1f
@@ -62,62 +65,112 @@ class ARActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityArBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        setupARFragment()
-        setupViews()
-        initializeTeethDetector()
-        loadBracketModel()
+        try {
+            binding = ActivityArBinding.inflate(layoutInflater)
+            setContentView(binding.root)
+
+            Log.d(TAG, "onCreate: Starting AR Activity")
+
+            setupViews()
+            initializeTeethDetector()
+
+            // Delay AR setup to ensure fragment is ready
+            binding.root.post {
+                setupARFragment()
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "onCreate failed: ${e.message}", e)
+            showErrorAndFinish("Failed to initialize AR: ${e.message}")
+        }
     }
 
     private fun setupARFragment() {
-        arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as CustomArFragment
+        try {
+            arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as? CustomArFragment
 
-        var lastDetectionTime = 0L
-        arFragment.arSceneView.scene.addOnUpdateListener {
-            arFragment.arSceneView.arFrame?.let { frame ->
-                val currentTime = System.currentTimeMillis()
-                if (isScanning && currentTime - lastDetectionTime > DETECTION_INTERVAL) {
-                    onUpdateFrame(frame)
-                    lastDetectionTime = currentTime
+            if (arFragment == null) {
+                Log.e(TAG, "ARFragment not found!")
+                showErrorAndFinish("Failed to load AR view")
+                return
+            }
+
+            Log.d(TAG, "ARFragment found, setting up listeners")
+
+            // Set up exception handler
+            arFragment?.setOnSessionInitializationListener { session ->
+                Log.d(TAG, "AR Session initialized successfully")
+                isARInitialized = true
+                loadBracketModel()
+            }
+
+            var lastDetectionTime = 0L
+            arFragment?.arSceneView?.scene?.addOnUpdateListener {
+                try {
+                    arFragment?.arSceneView?.arFrame?.let { frame ->
+                        val currentTime = System.currentTimeMillis()
+                        if (isScanning && currentTime - lastDetectionTime > DETECTION_INTERVAL) {
+                            onUpdateFrame(frame)
+                            lastDetectionTime = currentTime
+                        }
+                        updateTrackingStatus(frame)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Frame update error: ${e.message}")
                 }
-                updateTrackingStatus(frame)
             }
-        }
 
-        arFragment.setOnTapArPlaneListener { hitResult, plane, _ ->
-            if (!isLoadingModel) {
-                onPlaneTapped(hitResult, plane)
+            arFragment?.setOnTapArPlaneListener { hitResult, plane, _ ->
+                if (isARInitialized && !isLoadingModel) {
+                    onPlaneTapped(hitResult, plane)
+                }
             }
+
+            Log.d(TAG, "AR setup complete")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "setupARFragment failed: ${e.message}", e)
+            showErrorAndFinish("AR initialization failed: ${e.message}")
         }
     }
 
     private fun loadBracketModel() {
+        if (!isARInitialized) {
+            Log.w(TAG, "Cannot load model: AR not initialized yet")
+            return
+        }
+
         isLoadingModel = true
         updateStatus("Loading bracket model...")
 
         try {
             val assetFiles = assets.list("") ?: emptyArray()
+            Log.d(TAG, "Assets found: ${assetFiles.joinToString()}")
+
             val hasModel = assetFiles.any { it.equals(BRACKET_MODEL_NAME, ignoreCase = true) }
 
             if (hasModel) {
-                Log.d(TAG, "Loading 3D bracket model from assets...")
+                Log.d(TAG, "Found $BRACKET_MODEL_NAME, attempting to load...")
 
                 ModelRenderable.builder()
                     .setSource(this, Uri.parse(BRACKET_MODEL_NAME))
+                    .setIsFilamentGltf(false)  // OBJ format
                     .build()
                     .thenAccept { renderable ->
                         bracketRenderable = renderable
                         isLoadingModel = false
                         Log.d(TAG, "3D bracket model loaded successfully")
                         runOnUiThread {
-                            updateStatus("Ready - Tap to start")
-                            Toast.makeText(this, "3D Bracket Model Loaded", Toast.LENGTH_SHORT).show()
+                            updateStatus("Ready - Tap Start Scanning")
+                            Toast.makeText(this, "✓ 3D Bracket Model Loaded", Toast.LENGTH_SHORT).show()
                         }
                     }
                     .exceptionally { throwable ->
-                        Log.e(TAG, "Failed to load bracket model: ${throwable?.message}")
+                        Log.e(TAG, "Failed to load OBJ model: ${throwable?.message}", throwable)
+                        runOnUiThread {
+                            Toast.makeText(this, "Using simple bracket (model load failed)", Toast.LENGTH_SHORT).show()
+                        }
                         createFallbackBracket()
                         return@exceptionally null
                     }
@@ -126,30 +179,45 @@ class ARActivity : AppCompatActivity() {
                 createFallbackBracket()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error loading bracket model: ${e.message}")
+            Log.e(TAG, "Error loading bracket model: ${e.message}", e)
             createFallbackBracket()
         }
     }
 
     private fun createFallbackBracket() {
-        MaterialFactory.makeOpaqueWithColor(this, Color(0.85f, 0.85f, 0.9f, 1.0f))
-            .thenAccept { material ->
-                bracketRenderable = ShapeFactory.makeCube(
-                    Vector3(0.004f, 0.004f, 0.002f),
-                    Vector3.zero(),
-                    material
-                )
-                isLoadingModel = false
-                Log.d(TAG, "Using procedural bracket")
-                runOnUiThread {
-                    updateStatus("Ready - Using simple bracket")
+        if (!isARInitialized) {
+            Log.w(TAG, "Cannot create fallback: AR not initialized")
+            return
+        }
+
+        try {
+            MaterialFactory.makeOpaqueWithColor(this, Color(0.85f, 0.85f, 0.9f, 1.0f))
+                .thenAccept { material ->
+                    bracketRenderable = ShapeFactory.makeCube(
+                        Vector3(0.004f, 0.004f, 0.002f),
+                        Vector3.zero(),
+                        material
+                    )
+                    isLoadingModel = false
+                    Log.d(TAG, "Fallback bracket created successfully")
+                    runOnUiThread {
+                        updateStatus("Ready - Tap Start Scanning")
+                        Toast.makeText(this, "Using simple bracket model", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            }
-            .exceptionally { throwable ->
-                Log.e(TAG, "Failed to create fallback bracket: ${throwable?.message}")
-                isLoadingModel = false
-                return@exceptionally null
-            }
+                .exceptionally { throwable ->
+                    Log.e(TAG, "Failed to create fallback bracket: ${throwable?.message}", throwable)
+                    isLoadingModel = false
+                    runOnUiThread {
+                        updateStatus("Error loading bracket")
+                        Toast.makeText(this, "Failed to create bracket model", Toast.LENGTH_SHORT).show()
+                    }
+                    return@exceptionally null
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception creating fallback: ${e.message}", e)
+            isLoadingModel = false
+        }
     }
 
     private fun onUpdateFrame(frame: Frame) {
@@ -163,23 +231,27 @@ class ARActivity : AppCompatActivity() {
     }
 
     private fun updateTrackingStatus(frame: Frame) {
-        val trackingState = frame.camera.trackingState
+        try {
+            val trackingState = frame.camera.trackingState
 
-        runOnUiThread {
-            when (trackingState) {
-                TrackingState.TRACKING -> {
-                    if (!isScanning) {
-                        updateStatus("Ready - Tap Start Scanning")
+            runOnUiThread {
+                when (trackingState) {
+                    TrackingState.TRACKING -> {
+                        if (!isScanning && isARInitialized) {
+                            updateStatus("Ready - Tap Start Scanning")
+                        }
                     }
+                    TrackingState.PAUSED -> {
+                        updateStatus("Move device slowly")
+                    }
+                    TrackingState.STOPPED -> {
+                        updateStatus("Tracking lost - Move device")
+                    }
+                    else -> {}
                 }
-                TrackingState.PAUSED -> {
-                    updateStatus("Move device slowly")
-                }
-                TrackingState.STOPPED -> {
-                    updateStatus("Tracking lost")
-                }
-                else -> {}
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating tracking status: ${e.message}")
         }
     }
 
@@ -198,7 +270,7 @@ class ARActivity : AppCompatActivity() {
                 }
             }
         } catch (e: NotYetAvailableException) {
-            // Camera image not yet available
+            // Camera image not yet available - normal, ignore
         } catch (e: Exception) {
             Log.e(TAG, "Error processing frame: ${e.message}")
         }
@@ -295,11 +367,16 @@ class ARActivity : AppCompatActivity() {
             Log.d(TAG, "Teeth detector initialized")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize teeth detector: ${e.message}")
-            Toast.makeText(this, "Detection system initialized", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Detection system initialized (simulation mode)", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun startScanning() {
+        if (!isARInitialized) {
+            Toast.makeText(this, "AR not ready yet, please wait...", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         if (isLoadingModel) {
             Toast.makeText(this, "Loading model, please wait...", Toast.LENGTH_SHORT).show()
             return
@@ -327,11 +404,16 @@ class ARActivity : AppCompatActivity() {
             return
         }
 
+        if (arFragment == null) {
+            Toast.makeText(this, "AR not initialized", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         try {
             val anchorNode = AnchorNode(anchor)
-            anchorNode.setParent(arFragment.arSceneView.scene)
+            anchorNode.setParent(arFragment!!.arSceneView.scene)
 
-            val bracketNode = TransformableNode(arFragment.transformationSystem)
+            val bracketNode = TransformableNode(arFragment!!.transformationSystem)
             bracketNode.setParent(anchorNode)
             bracketNode.renderable = bracketRenderable
             bracketNode.localScale = Vector3(0.01f, 0.01f, 0.01f)
@@ -351,8 +433,8 @@ class ARActivity : AppCompatActivity() {
             Toast.makeText(this, "Bracket #$id placed", Toast.LENGTH_SHORT).show()
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error placing bracket: ${e.message}")
-            Toast.makeText(this, "Failed to place bracket", Toast.LENGTH_SHORT).show()
+            Log.e(TAG, "Error placing bracket: ${e.message}", e)
+            Toast.makeText(this, "Failed to place bracket: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -370,7 +452,7 @@ class ARActivity : AppCompatActivity() {
 
     private fun captureScene() {
         try {
-            val view = arFragment.arSceneView
+            val view = arFragment?.arSceneView ?: return
             val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
 
             PixelCopy.request(
@@ -389,7 +471,7 @@ class ARActivity : AppCompatActivity() {
             )
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error capturing scene: ${e.message}")
+            Log.e(TAG, "Error capturing scene: ${e.message}", e)
             Toast.makeText(this, "Failed to capture", Toast.LENGTH_SHORT).show()
         }
     }
@@ -409,7 +491,7 @@ class ARActivity : AppCompatActivity() {
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving: ${e.message}")
+            Log.e(TAG, "Error saving: ${e.message}", e)
             runOnUiThread {
                 Toast.makeText(this, "Failed to save image", Toast.LENGTH_SHORT).show()
             }
@@ -417,53 +499,64 @@ class ARActivity : AppCompatActivity() {
     }
 
     private fun resetScene() {
-        bracketNodes.forEach { node ->
-            node.transformableNode.setParent(null)
-            node.anchorNode.anchor?.detach()
+        try {
+            bracketNodes.forEach { node ->
+                node.transformableNode.setParent(null)
+                node.anchorNode.anchor?.detach()
+            }
+            val count = bracketNodes.size
+            bracketNodes.clear()
+            detectedTeeth.clear()
+            selectedBracket = null
+
+            isScanning = false
+            binding.scanButton.visibility = View.VISIBLE
+            binding.captureButton.visibility = View.GONE
+            binding.resetButton.visibility = View.GONE
+            binding.detectionCard.visibility = View.GONE
+            binding.hintCard.visibility = View.GONE
+            binding.controlsCard.visibility = View.GONE
+            binding.detectionProgressBar.progress = 0
+            updateStatus("Ready to start")
+
+            Toast.makeText(this, "Reset complete - $count brackets removed", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resetting scene: ${e.message}", e)
         }
-        val count = bracketNodes.size
-        bracketNodes.clear()
-        detectedTeeth.clear()
-        selectedBracket = null
-
-        isScanning = false
-        binding.scanButton.visibility = View.VISIBLE
-        binding.captureButton.visibility = View.GONE
-        binding.resetButton.visibility = View.GONE
-        binding.detectionCard.visibility = View.GONE
-        binding.hintCard.visibility = View.GONE
-        binding.controlsCard.visibility = View.GONE
-        binding.detectionProgressBar.progress = 0
-        updateStatus("Ready to start")
-
-        Toast.makeText(this, "Reset complete - $count brackets removed", Toast.LENGTH_SHORT).show()
     }
 
     private fun showInfoDialog() {
         val modelStatus = when {
             isLoadingModel -> "Loading..."
-            bracketRenderable != null -> "Loaded"
+            bracketRenderable != null -> "✓ Loaded"
             else -> "Fallback Mode"
         }
 
-        val mlStatus = if (teethDetector.hasModel()) "ML Active" else "Simulation"
+        val mlStatus = if (teethDetector.hasModel()) "✓ ML Active" else "Simulation"
+        val arStatus = if (isARInitialized) "✓ Ready" else "Initializing..."
 
         AlertDialog.Builder(this)
             .setTitle("Dental AR Bracket Placer")
             .setMessage(
                 """
                 STATUS:
+                AR System: $arStatus
                 Bracket Model: $modelStatus
                 Teeth Detection: $mlStatus
                 Brackets Placed: ${bracketNodes.size}
                 
                 HOW TO USE:
-                1. Tap Start Scanning
-                2. Point at dental model
-                3. Tap surface to place bracket
-                4. Use controls to adjust
-                5. Tap bracket to select
-                6. Capture to save
+                1. Wait for "Ready" status
+                2. Tap Start Scanning
+                3. Point at surface/dental model
+                4. Tap surface to place bracket
+                5. Use gestures to adjust:
+                   • Pinch to zoom
+                   • Two fingers to rotate
+                   • Drag to move
+                6. Tap bracket to select
+                7. Use controls to fine-tune
+                8. Capture to save
                 """.trimIndent()
             )
             .setPositiveButton("OK", null)
@@ -473,28 +566,91 @@ class ARActivity : AppCompatActivity() {
     private fun updateStatus(message: String) {
         runOnUiThread {
             binding.statusTextView.text = message
+            Log.d(TAG, "Status: $message")
+        }
+    }
+
+    private fun showErrorAndFinish(message: String) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("AR Error")
+                .setMessage(message)
+                .setPositiveButton("OK") { _, _ -> finish() }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            arFragment?.onResume()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onResume: ${e.message}", e)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try {
+            arFragment?.onPause()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onPause: ${e.message}", e)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        teethDetector.close()
+        try {
+            teethDetector.close()
+            arFragment = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onDestroy: ${e.message}", e)
+        }
     }
 }
 
 class CustomArFragment : ArFragment() {
 
+    companion object {
+        private const val TAG = "CustomArFragment"
+    }
+
+    private var sessionInitListener: ((Session) -> Unit)? = null
+
+    fun setOnSessionInitializationListener(listener: (Session) -> Unit) {
+        sessionInitListener = listener
+    }
+
     override fun onAttach(context: Context) {
         super.onAttach(context)
+        Log.d(TAG, "CustomArFragment attached")
+    }
 
-        // Configure ARCore session using the new API
-        setOnSessionConfigurationListener { session, config ->
+    override fun getSessionConfiguration(session: Session): Config {
+        val config = super.getSessionConfiguration(session)
+
+        try {
+            // Configure ARCore session
             config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             config.focusMode = Config.FocusMode.AUTO
 
-            Log.d("CustomArFragment", "AR Session configured")
+            Log.d(TAG, "AR Session configured successfully")
+
+            // Notify listener after successful configuration
+            sessionInitListener?.invoke(session)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error configuring AR session: ${e.message}", e)
         }
+
+        return config
+    }
+
+    override fun onException(exception: UnavailableException?) {
+        super.onException(exception)
+        Log.e(TAG, "AR Exception: ${exception?.message}", exception)
     }
 }
