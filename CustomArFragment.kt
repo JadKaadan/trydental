@@ -6,7 +6,6 @@ import android.util.Log
 import android.view.View
 import com.google.ar.core.Config
 import com.google.ar.core.Session
-import com.google.ar.core.exceptions.UnavailableException
 import com.google.ar.sceneform.ux.ArFragment
 
 class CustomArFragment : ArFragment() {
@@ -26,62 +25,50 @@ class CustomArFragment : ArFragment() {
         super.onViewCreated(view, savedInstanceState)
         Log.d(TAG, "CustomArFragment view created")
 
-        // Disable the plane discovery controller to prevent default behavior
-        planeDiscoveryController.hide()
-        planeDiscoveryController.setInstructionView(null)
-
-        // Set up ArSceneView
-        arSceneView.planeRenderer.isVisible = true
-        arSceneView.planeRenderer.isShadowReceiver = false
+        // Configure ArSceneView
+        arSceneView?.apply {
+            planeRenderer.isVisible = true
+            planeRenderer.isShadowReceiver = false
+        }
     }
 
     fun setOnSessionInitializationListener(listener: (Session) -> Unit) {
         sessionInitListener = listener
     }
 
-    override fun getSessionConfiguration(session: Session): Config {
-        val config = super.getSessionConfiguration(session)
+    override fun onResume() {
+        super.onResume()
 
+        // Configure the AR session when it's created
         try {
+            arSceneView?.session?.let { session ->
+                configureSession(session)
+                sessionInitListener?.invoke(session)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error configuring session in onResume: ${e.message}", e)
+        }
+    }
+
+    private fun configureSession(session: Session) {
+        try {
+            val config = session.config
+
             // Configure ARCore session with advanced features
             config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             config.focusMode = Config.FocusMode.AUTO
-            config.depthMode = Config.DepthMode.AUTOMATIC
+
+            // Apply configuration
+            session.configure(config)
 
             Log.d(TAG, "AR Session configured successfully with advanced features")
-
-            // Notify listener after successful configuration
-            sessionInitListener?.invoke(session)
-
         } catch (e: Exception) {
             Log.e(TAG, "Error configuring AR session: ${e.message}", e)
+
+            val message = "Failed to configure AR session: ${e.message}"
+            (activity as? ARActivity)?.handleARException(message)
         }
-
-        return config
-    }
-
-    override fun getSessionFeatures(): Set<Session.Feature> {
-        return setOf(Session.Feature.FRONT_CAMERA)
-    }
-
-    override fun onException(exception: UnavailableException?) {
-        super.onException(exception)
-        Log.e(TAG, "AR Exception: ${exception?.message}", exception)
-
-        val message = when (exception) {
-            is com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException ->
-                "ARCore is not installed"
-            is com.google.ar.core.exceptions.UnavailableApkTooOldException ->
-                "ARCore APK is too old"
-            is com.google.ar.core.exceptions.UnavailableSdkTooOldException ->
-                "ARCore SDK is too old"
-            is com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException ->
-                "This device does not support AR"
-            else -> "AR is not available: ${exception?.message}"
-        }
-
-        (activity as? ARActivity)?.handleARException(message)
     }
 }
