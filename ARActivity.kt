@@ -86,48 +86,48 @@ class ARActivity : AppCompatActivity() {
         }
     }
 
+    fun handleARException(message: String) {
+        runOnUiThread {
+            Log.e(TAG, "AR Exception handled: $message")
+            AlertDialog.Builder(this)
+                .setTitle("AR Error")
+                .setMessage(message)
+                .setPositiveButton("OK") { _, _ -> finish() }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    // Update setupARFragment method
     private fun setupARFragment() {
         try {
-            arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as? CustomArFragment
+            // Use supportFragmentManager transaction for safer fragment handling
+            val fragmentManager = supportFragmentManager
+            var fragment = fragmentManager.findFragmentById(R.id.arFragment)
+
+            if (fragment == null) {
+                Log.d(TAG, "Creating new CustomArFragment")
+                fragment = CustomArFragment()
+                fragmentManager.beginTransaction()
+                    .add(R.id.arFragment, fragment)
+                    .commit()
+                fragmentManager.executePendingTransactions()
+            }
+
+            arFragment = fragment as? CustomArFragment
 
             if (arFragment == null) {
-                Log.e(TAG, "ARFragment not found!")
-                showErrorAndFinish("Failed to load AR view")
+                Log.e(TAG, "Failed to cast fragment to CustomArFragment")
+                showErrorAndFinish("Failed to initialize AR fragment")
                 return
             }
 
-            Log.d(TAG, "ARFragment found, setting up listeners")
+            Log.d(TAG, "ARFragment initialized, setting up listeners")
 
-            // Set up exception handler
-            arFragment?.setOnSessionInitializationListener { session ->
-                Log.d(TAG, "AR Session initialized successfully")
-                isARInitialized = true
-                loadBracketModel()
+            // Wait for the fragment to be fully ready
+            arFragment?.view?.post {
+                setupARListeners()
             }
-
-            var lastDetectionTime = 0L
-            arFragment?.arSceneView?.scene?.addOnUpdateListener {
-                try {
-                    arFragment?.arSceneView?.arFrame?.let { frame ->
-                        val currentTime = System.currentTimeMillis()
-                        if (isScanning && currentTime - lastDetectionTime > DETECTION_INTERVAL) {
-                            onUpdateFrame(frame)
-                            lastDetectionTime = currentTime
-                        }
-                        updateTrackingStatus(frame)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Frame update error: ${e.message}")
-                }
-            }
-
-            arFragment?.setOnTapArPlaneListener { hitResult, plane, _ ->
-                if (isARInitialized && !isLoadingModel) {
-                    onPlaneTapped(hitResult, plane)
-                }
-            }
-
-            Log.d(TAG, "AR setup complete")
 
         } catch (e: Exception) {
             Log.e(TAG, "setupARFragment failed: ${e.message}", e)
@@ -183,6 +183,54 @@ class ARActivity : AppCompatActivity() {
             createFallbackBracket()
         }
     }
+
+    private fun setupARListeners() {
+        try {
+            // Set up exception handler
+            arFragment?.setOnSessionInitializationListener { session ->
+                Log.d(TAG, "AR Session initialized successfully")
+                isARInitialized = true
+                runOnUiThread {
+                    loadBracketModel()
+                    updateStatus("AR Ready - Loading bracket model...")
+                }
+            }
+
+            var lastDetectionTime = 0L
+            arFragment?.arSceneView?.scene?.addOnUpdateListener { frameTime ->
+                try {
+                    val frame = arFragment?.arSceneView?.arFrame
+                    if (frame != null) {
+                        val currentTime = System.currentTimeMillis()
+                        if (isScanning && currentTime - lastDetectionTime > DETECTION_INTERVAL) {
+                            onUpdateFrame(frame)
+                            lastDetectionTime = currentTime
+                        }
+                        updateTrackingStatus(frame)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Frame update error: ${e.message}")
+                }
+            }
+
+            arFragment?.setOnTapArPlaneListener { hitResult, plane, motionEvent ->
+                if (isARInitialized && !isLoadingModel && bracketRenderable != null) {
+                    onPlaneTapped(hitResult, plane)
+                } else if (!isARInitialized) {
+                    Toast.makeText(this, "AR is still initializing...", Toast.LENGTH_SHORT).show()
+                } else if (isLoadingModel) {
+                    Toast.makeText(this, "Bracket model is still loading...", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            Log.d(TAG, "AR listeners setup complete")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up AR listeners: ${e.message}", e)
+        }
+    }
+
+
 
     private fun createFallbackBracket() {
         if (!isARInitialized) {
