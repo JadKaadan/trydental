@@ -1,0 +1,5 @@
+this file has the latest update but with simple obje t placeholder 
+
+  it does run perfectly tho 
+
+  the codes in my actual project is updated more than these so next time if i want to work on it i should keep the git as it is but update the aractivity and teethdetector only because they are only the ones who changed 
