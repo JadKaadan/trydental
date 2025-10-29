@@ -357,9 +357,6 @@ class ARActivity : AppCompatActivity() {
         val sceneView = arFragment?.arSceneView ?: return
         if (sceneView.width == 0 || sceneView.height == 0) return
 
-        val inputCoords = FloatArray(2)
-        val viewCoords = FloatArray(2)
-
         for (detection in detections) {
             val centerXNorm = detection.boundingBox.centerX()
             val centerYNorm = detection.boundingBox.centerY()
@@ -367,6 +364,7 @@ class ARActivity : AppCompatActivity() {
             if (centerXNorm.isNaN() || centerYNorm.isNaN()) continue
             if (centerXNorm !in 0f..1f || centerYNorm !in 0f..1f) continue
 
+            // Check if bracket already exists for this detection
             val matchingBracket = bracketNodes.firstOrNull { node ->
                 node.detectionBox?.let { existingBox ->
                     calculateIoU(existingBox, detection.boundingBox) > 0.45f
@@ -379,11 +377,9 @@ class ARActivity : AppCompatActivity() {
                 continue
             }
 
-            inputCoords[0] = centerXNorm
-            inputCoords[1] = centerYNorm
-
+            // ✅ FIXED: Properly transform coordinates
             try {
-                val inputBuffer  = FloatBuffer.wrap(floatArrayOf(centerXNorm, centerYNorm))
+                val inputBuffer = FloatBuffer.wrap(floatArrayOf(centerXNorm, centerYNorm))
                 val outputBuffer = FloatBuffer.allocate(2)
 
                 frame.transformCoordinates2d(
@@ -392,40 +388,54 @@ class ARActivity : AppCompatActivity() {
                     Coordinates2d.VIEW,
                     outputBuffer
                 )
-            } catch (e: Exception) {
-                Log.w(TAG, "Coordinate transform failed: ${e.message}")
-                continue
-            }
 
-            val screenX = viewCoords[0]
-            val screenY = viewCoords[1]
+                // ✅ Extract the transformed coordinates
+                outputBuffer.rewind()
+                val screenX = outputBuffer.get(0)
+                val screenY = outputBuffer.get(1)
 
-            if (!screenX.isFinite() || !screenY.isFinite()) continue
-
-            val hits = frame.hitTest(screenX, screenY)
-            for (hit in hits) {
-                val trackable = hit.trackable
-                val pose = hit.hitPose
-
-                val canPlace = when (trackable) {
-                    is Plane -> trackable.isPoseInPolygon(pose) && trackable.trackingState == TrackingState.TRACKING
-                    is Point -> trackable.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL
-                    else -> false
+                if (!screenX.isFinite() || !screenY.isFinite()) {
+                    Log.w(TAG, "Invalid screen coordinates: ($screenX, $screenY)")
+                    continue
                 }
 
-                if (canPlace) {
-                    val anchor = hit.createAnchor()
-                    runOnUiThread {
-                        placeBracket(
-                            anchor = anchor,
-                            detectionCenter = Pair(centerXNorm, centerYNorm),
-                            detectionBox = detection.boundingBox,
-                            shouldSelect = false,
-                            showToast = false
-                        )
+                Log.d(TAG, "Attempting hit test at screen coords: ($screenX, $screenY) from normalized: ($centerXNorm, $centerYNorm)")
+
+                // Do hit test
+                val hits = frame.hitTest(screenX, screenY)
+                if (hits.isEmpty()) {
+                    Log.d(TAG, "No hits found at ($screenX, $screenY)")
+                    continue
+                }
+
+                for (hit in hits) {
+                    val trackable = hit.trackable
+                    val pose = hit.hitPose
+
+                    val canPlace = when (trackable) {
+                        is Plane -> trackable.isPoseInPolygon(pose) && trackable.trackingState == TrackingState.TRACKING
+                        is Point -> trackable.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL
+                        else -> false
                     }
-                    break
+
+                    if (canPlace) {
+                        val anchor = hit.createAnchor()
+                        runOnUiThread {
+                            placeBracket(
+                                anchor = anchor,
+                                detectionCenter = Pair(centerXNorm, centerYNorm),
+                                detectionBox = detection.boundingBox,
+                                shouldSelect = false,
+                                showToast = false
+                            )
+                            Log.i(TAG, "✓ Bracket placed automatically at ($screenX, $screenY)")
+                        }
+                        break
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Coordinate transform failed: ${e.message}", e)
+                continue
             }
         }
     }
