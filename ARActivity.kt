@@ -2,6 +2,7 @@ package com.dental.arapp
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -31,6 +32,8 @@ import com.google.ar.sceneform.ux.TransformableNode
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
+import com.google.ar.core.Coordinates2d
+import java.nio.FloatBuffer
 import java.util.*
 
 class ARActivity : AppCompatActivity() {
@@ -53,15 +56,20 @@ class ARActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "ARActivity"
-        private const val BRACKET_MODEL_NAME = "Bracket.obj"
+        private const val BRACKET_MODEL_NAME = "OrthodonticBracket.glb"
         private const val DETECTION_INTERVAL = 500L
     }
 
     data class BracketNode(
         val transformableNode: TransformableNode,
         val anchorNode: AnchorNode,
-        val id: Int
+        val id: Int,
+        var detectionCenter: Pair<Float, Float>? = null,
+        var detectionBox: RectF? = null,
+        var userRotationDegrees: Float = 0f,
+        var userScaleMultiplier: Float = 1f
     )
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -153,21 +161,24 @@ class ARActivity : AppCompatActivity() {
             if (hasModel) {
                 Log.d(TAG, "Found $BRACKET_MODEL_NAME, attempting to load...")
 
+                // IMPORTANT: GLB files need setIsFilamentGltf(true)
                 ModelRenderable.builder()
                     .setSource(this, Uri.parse(BRACKET_MODEL_NAME))
-                    .setIsFilamentGltf(false)  // OBJ format
+                    .setIsFilamentGltf(true)  // Changed to true for GLB/glTF format
                     .build()
                     .thenAccept { renderable ->
                         bracketRenderable = renderable
                         isLoadingModel = false
-                        Log.d(TAG, "3D bracket model loaded successfully")
+                        Log.d(TAG, "3D bracket model (GLB) loaded successfully")
                         runOnUiThread {
                             updateStatus("Ready - Tap Start Scanning")
                             Toast.makeText(this, "✓ 3D Bracket Model Loaded", Toast.LENGTH_SHORT).show()
                         }
                     }
                     .exceptionally { throwable ->
-                        Log.e(TAG, "Failed to load OBJ model: ${throwable?.message}", throwable)
+                        Log.e(TAG, "Failed to load GLB model: ${throwable?.message}", throwable)
+                        // Print full stack trace for debugging
+                        throwable?.printStackTrace()
                         runOnUiThread {
                             Toast.makeText(this, "Using simple bracket (model load failed)", Toast.LENGTH_SHORT).show()
                         }
@@ -180,6 +191,7 @@ class ARActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error loading bracket model: ${e.message}", e)
+            e.printStackTrace()
             createFallbackBracket()
         }
     }
@@ -320,14 +332,17 @@ class ARActivity : AppCompatActivity() {
             frame.acquireCameraImage().use { image ->
                 val detections = teethDetector.detect(image)
 
-                if (detections.isNotEmpty()) {
-                    detectedTeeth.clear()
-                    detectedTeeth.addAll(detections)
+                detectedTeeth.clear()
+                detectedTeeth.addAll(detections)
 
-                    runOnUiThread {
-                        updateDetectionProgress(detections.size)
-                    }
+                if (detections.isNotEmpty()) {
+                    placeBracketsForDetections(frame, detections)
                 }
+
+                runOnUiThread {
+                    updateDetectionProgress(detections.size)
+                }
+
             }
         } catch (e: NotYetAvailableException) {
             // Camera image not yet available - normal, ignore
@@ -335,6 +350,103 @@ class ARActivity : AppCompatActivity() {
             Log.e(TAG, "Error processing frame: ${e.message}")
         }
     }
+
+    private fun placeBracketsForDetections(frame: Frame, detections: List<Detection>) {
+        if (bracketRenderable == null || arFragment == null) return
+
+        val sceneView = arFragment?.arSceneView ?: return
+        if (sceneView.width == 0 || sceneView.height == 0) return
+
+        val inputCoords = FloatArray(2)
+        val viewCoords = FloatArray(2)
+
+        for (detection in detections) {
+            val centerXNorm = detection.boundingBox.centerX()
+            val centerYNorm = detection.boundingBox.centerY()
+
+            if (centerXNorm.isNaN() || centerYNorm.isNaN()) continue
+            if (centerXNorm !in 0f..1f || centerYNorm !in 0f..1f) continue
+
+            val matchingBracket = bracketNodes.firstOrNull { node ->
+                node.detectionBox?.let { existingBox ->
+                    calculateIoU(existingBox, detection.boundingBox) > 0.45f
+                } ?: false
+            }
+
+            if (matchingBracket != null) {
+                matchingBracket.detectionCenter = Pair(centerXNorm, centerYNorm)
+                matchingBracket.detectionBox = detection.boundingBox
+                continue
+            }
+
+            inputCoords[0] = centerXNorm
+            inputCoords[1] = centerYNorm
+
+            try {
+                val inputBuffer  = FloatBuffer.wrap(floatArrayOf(centerXNorm, centerYNorm))
+                val outputBuffer = FloatBuffer.allocate(2)
+
+                frame.transformCoordinates2d(
+                    Coordinates2d.IMAGE_NORMALIZED,
+                    inputBuffer,
+                    Coordinates2d.VIEW,
+                    outputBuffer
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Coordinate transform failed: ${e.message}")
+                continue
+            }
+
+            val screenX = viewCoords[0]
+            val screenY = viewCoords[1]
+
+            if (!screenX.isFinite() || !screenY.isFinite()) continue
+
+            val hits = frame.hitTest(screenX, screenY)
+            for (hit in hits) {
+                val trackable = hit.trackable
+                val pose = hit.hitPose
+
+                val canPlace = when (trackable) {
+                    is Plane -> trackable.isPoseInPolygon(pose) && trackable.trackingState == TrackingState.TRACKING
+                    is Point -> trackable.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL
+                    else -> false
+                }
+
+                if (canPlace) {
+                    val anchor = hit.createAnchor()
+                    runOnUiThread {
+                        placeBracket(
+                            anchor = anchor,
+                            detectionCenter = Pair(centerXNorm, centerYNorm),
+                            detectionBox = detection.boundingBox,
+                            shouldSelect = false,
+                            showToast = false
+                        )
+                    }
+                    break
+                }
+            }
+        }
+    }
+
+    private fun calculateIoU(boxA: RectF, boxB: RectF): Float {
+        val intersectionLeft = maxOf(boxA.left, boxB.left)
+        val intersectionTop = maxOf(boxA.top, boxB.top)
+        val intersectionRight = minOf(boxA.right, boxB.right)
+        val intersectionBottom = minOf(boxA.bottom, boxB.bottom)
+
+        if (intersectionRight <= intersectionLeft || intersectionBottom <= intersectionTop) {
+            return 0f
+        }
+
+        val intersectionArea = (intersectionRight - intersectionLeft) * (intersectionBottom - intersectionTop)
+        val boxAArea = boxA.width() * boxA.height()
+        val boxBArea = boxB.width() * boxB.height()
+        val union = boxAArea + boxBArea - intersectionArea
+        return if (union <= 0f) 0f else intersectionArea / union
+    }
+
 
     private fun updateDetectionProgress(teethCount: Int) {
         val progress = (teethCount * 100) / 32
@@ -379,7 +491,7 @@ class ARActivity : AppCompatActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
                     scaleValue = 0.5f + (progress / 100f) * 1.5f
-                    binding.scaleValue.text = String.format("%.1fx", scaleValue)
+                    binding.scaleValue.text = String.format(Locale.US, "%.1fx", scaleValue)
                     applyScaleToSelected()
                 }
             }
@@ -396,6 +508,7 @@ class ARActivity : AppCompatActivity() {
         selectedBracket?.let { bracket ->
             val quaternion = Quaternion.axisAngle(Vector3(0f, 1f, 0f), rotationAngle)
             bracket.transformableNode.localRotation = quaternion
+            bracket.userRotationDegrees = rotationAngle
         }
     }
 
@@ -406,6 +519,7 @@ class ARActivity : AppCompatActivity() {
                 scaleValue * 0.01f,
                 scaleValue * 0.01f
             )
+            bracket.userScaleMultiplier = scaleValue
         }
     }
 
@@ -458,7 +572,13 @@ class ARActivity : AppCompatActivity() {
         placeBracket(anchor)
     }
 
-    private fun placeBracket(anchor: Anchor) {
+    private fun placeBracket(
+        anchor: Anchor,
+        detectionCenter: Pair<Float, Float>? = null,
+        detectionBox: RectF? = null,
+        shouldSelect: Boolean = true,
+        showToast: Boolean = true
+    ) {
         if (bracketRenderable == null) {
             Toast.makeText(this, "Bracket model not ready", Toast.LENGTH_SHORT).show()
             return
@@ -476,10 +596,16 @@ class ARActivity : AppCompatActivity() {
             val bracketNode = TransformableNode(arFragment!!.transformationSystem)
             bracketNode.setParent(anchorNode)
             bracketNode.renderable = bracketRenderable
-            bracketNode.localScale = Vector3(0.01f, 0.01f, 0.01f)
+            val initialScale = if (detectionCenter != null) 1f else scaleValue
+            val initialRotation = if (detectionCenter != null) 0f else rotationAngle
+
+            bracketNode.localScale = Vector3(initialScale * 0.01f, initialScale * 0.01f, initialScale * 0.01f)
+            bracketNode.localRotation = Quaternion.axisAngle(Vector3(0f, 1f, 0f), initialRotation)
 
             val id = bracketNodes.size + 1
-            val wrapper = BracketNode(bracketNode, anchorNode, id)
+            val wrapper = BracketNode(bracketNode, anchorNode, id, detectionCenter, detectionBox)
+            wrapper.userScaleMultiplier = initialScale
+            wrapper.userRotationDegrees = initialRotation
             bracketNodes.add(wrapper)
 
             bracketNode.setOnTapListener { _, _ ->
@@ -487,10 +613,14 @@ class ARActivity : AppCompatActivity() {
                 true
             }
 
-            bracketNode.select()
-            selectBracket(wrapper)
+            if (shouldSelect) {
+                bracketNode.select()
+                selectBracket(wrapper)
+            }
 
-            Toast.makeText(this, "Bracket #$id placed", Toast.LENGTH_SHORT).show()
+            if (showToast) {
+                Toast.makeText(this, "Bracket #$id placed", Toast.LENGTH_SHORT).show()
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "Error placing bracket: ${e.message}", e)
@@ -498,16 +628,22 @@ class ARActivity : AppCompatActivity() {
         }
     }
 
+
     private fun selectBracket(bracket: BracketNode) {
         selectedBracket = bracket
 
         binding.controlsCard.visibility = View.VISIBLE
         binding.selectedBracketText.text = "Bracket #${bracket.id} selected"
 
-        val currentScale = bracket.transformableNode.localScale.x / 0.01f
+        rotationAngle = bracket.userRotationDegrees
+        scaleValue = bracket.userScaleMultiplier.takeIf { it > 0f } ?: 1f
+        val rotationProgress = rotationAngle.coerceIn(0f, binding.rotationSeekBar.max.toFloat()).toInt()
+        binding.rotationSeekBar.progress = rotationProgress
+        binding.rotationValue.text = String.format(Locale.US, "%.0f°", rotationAngle)
 
-        binding.rotationSeekBar.progress = rotationAngle.toInt()
-        binding.scaleSeekBar.progress = ((currentScale - 0.5f) / 1.5f * 100).toInt()
+        val scaleProgress = (((scaleValue - 0.5f) / 1.5f) * 100f).coerceIn(0f, 100f)
+        binding.scaleSeekBar.progress = scaleProgress.toInt()
+        binding.scaleValue.text = String.format(Locale.US, "%.1fx", scaleValue)
     }
 
     private fun captureScene() {
@@ -568,6 +704,8 @@ class ARActivity : AppCompatActivity() {
             bracketNodes.clear()
             detectedTeeth.clear()
             selectedBracket = null
+            rotationAngle = 0f
+            scaleValue = 1f
 
             isScanning = false
             binding.scanButton.visibility = View.VISIBLE
@@ -577,6 +715,11 @@ class ARActivity : AppCompatActivity() {
             binding.hintCard.visibility = View.GONE
             binding.controlsCard.visibility = View.GONE
             binding.detectionProgressBar.progress = 0
+            binding.rotationSeekBar.progress = 0
+            binding.rotationValue.text = String.format(Locale.US, "%.0f°", rotationAngle)
+            val defaultScaleProgress = (((scaleValue - 0.5f) / 1.5f) * 100f).coerceIn(0f, 100f)
+            binding.scaleSeekBar.progress = defaultScaleProgress.toInt()
+            binding.scaleValue.text = String.format(Locale.US, "%.1fx", scaleValue)
             updateStatus("Ready to start")
 
             Toast.makeText(this, "Reset complete - $count brackets removed", Toast.LENGTH_SHORT).show()
@@ -617,6 +760,10 @@ class ARActivity : AppCompatActivity() {
                 6. Tap bracket to select
                 7. Use controls to fine-tune
                 8. Capture to save
+                
+                REQUIRED FILES:
+                • bracket.glb (in assets folder)
+                • tooth_detection_yolov8.tflite (in assets folder)
                 """.trimIndent()
             )
             .setPositiveButton("OK", null)
