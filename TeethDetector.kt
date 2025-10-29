@@ -36,7 +36,7 @@ class TeethDetector(private val context: Context) {
 
     companion object {
         private const val TAG = "TeethDetector"
-        private const val MODEL_NAME = "yolov8_teeth.tflite"
+        private const val MODEL_NAME = "tooth_detection_yolov8.tflite"
         private const val INPUT_SIZE = 640
         private const val CONFIDENCE_THRESHOLD = 0.5f
         private const val IOU_THRESHOLD = 0.45f
@@ -84,10 +84,12 @@ class TeethDetector(private val context: Context) {
             val outputBuffer = Array(1) { Array(8400) { FloatArray(84) } }
             interpreter?.run(inputBuffer, outputBuffer)
             return postprocessResults(outputBuffer[0])
+
         } catch (e: Exception) {
             Log.e(TAG, "Detection error: ${e.message}")
             return emptyList()
         }
+
     }
 
     private fun preprocessImage(image: Image): ByteBuffer {
